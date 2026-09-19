@@ -102,3 +102,9 @@ export interface SessionApiResponse {
   }>;
   error?: string;
 }
+
+export interface SessionIndexItem {
+  id: string;
+  title: string;
+  lastActive: string;
+}

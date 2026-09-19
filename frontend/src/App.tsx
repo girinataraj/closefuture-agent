@@ -1,13 +1,21 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Header } from "./components/Header.js";
+import { SessionDrawer } from "./components/SessionDrawer.js";
 import { EmptyState } from "./components/EmptyState.js";
 import { ChatMessage } from "./components/ChatMessage.js";
+import { Composer } from "./components/Composer.js";
 import { TracePanel } from "./components/TracePanel.js";
 import { sendChatMessage, fetchSessionHistory, createNewSession } from "./api/chatApi.js";
-import type { ChatMessage as ChatMessageType, SanitizedTrace, SlotOption } from "./types/chat.js";
+import type {
+  ChatMessage as ChatMessageType,
+  SanitizedTrace,
+  SlotOption,
+  SessionIndexItem,
+} from "./types/chat.js";
 import "./App.css";
 
 const SESSION_STORAGE_KEY = "closefuture_session_id";
+const SESSIONS_INDEX_KEY = "closefuture_sessions_index";
 const TRACE_STORAGE_KEY = "closefuture_last_trace";
 
 export function App() {
@@ -18,11 +26,30 @@ export function App() {
   const [isInitializing, setIsInitializing] = useState<boolean>(true);
   const [lastTrace, setLastTrace] = useState<SanitizedTrace | null>(null);
   const [lastAgent, setLastAgent] = useState<string | undefined>(undefined);
-  const [showTrace, setShowTrace] = useState<boolean>(true);
+  const [showTrace, setShowTrace] = useState<boolean>(false);
+  const [showSessions, setShowSessions] = useState<boolean>(false);
+  const [sessions, setSessions] = useState<SessionIndexItem[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const initRanRef = useRef<boolean>(false);
+
+  const loadSessionsIndex = (): SessionIndexItem[] => {
+    try {
+      const raw = localStorage.getItem(SESSIONS_INDEX_KEY);
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch {}
+    return [];
+  };
+
+  const saveSessionsIndex = (items: SessionIndexItem[]) => {
+    try {
+      localStorage.setItem(SESSIONS_INDEX_KEY, JSON.stringify(items));
+      setSessions(items);
+    } catch {}
+  };
 
   // ---------------------------------------------------------------------------
   // 1. SESSION INITIALIZATION & RESTORE (Reload-Safe)
@@ -33,8 +60,9 @@ export function App() {
 
     async function initSession() {
       const storedSessionId = localStorage.getItem(SESSION_STORAGE_KEY);
+      const existingIndex = loadSessionsIndex();
+      setSessions(existingIndex);
 
-      // Restore last trace from localStorage if available
       const storedTrace = localStorage.getItem(TRACE_STORAGE_KEY);
       if (storedTrace) {
         try {
@@ -46,7 +74,6 @@ export function App() {
         try {
           const res = await fetchSessionHistory(storedSessionId);
           if (res.success) {
-            // Keep the exact same ID
             setSessionId(storedSessionId);
 
             if (res.messages && res.messages.length > 0) {
@@ -79,15 +106,20 @@ export function App() {
         }
       }
 
-      // If no stored session or session returned 404, generate new UUID
       const newSessionId = crypto.randomUUID();
       localStorage.setItem(SESSION_STORAGE_KEY, newSessionId);
       setSessionId(newSessionId);
       setMessages([]);
       setIsInitializing(false);
 
-      // Eagerly register session in Supabase so subsequent reload immediately finds it
       createNewSession(newSessionId).catch(() => null);
+
+      const newEntry: SessionIndexItem = {
+        id: newSessionId,
+        title: "New Conversation",
+        lastActive: new Date().toISOString(),
+      };
+      saveSessionsIndex([newEntry, ...existingIndex.filter((s) => s.id !== newSessionId)]);
     }
 
     initSession();
@@ -112,12 +144,64 @@ export function App() {
     setLastAgent(undefined);
     setErrorMessage(null);
     setInputValue("");
-    // Register eager session in Supabase so subsequent reload before message finds it
+
     createNewSession(freshId).catch(() => null);
+
+    const current = loadSessionsIndex();
+    const updated = [
+      { id: freshId, title: "New Conversation", lastActive: new Date().toISOString() },
+      ...current.filter((s) => s.id !== freshId),
+    ];
+    saveSessionsIndex(updated);
   };
 
   // ---------------------------------------------------------------------------
-  // 3. SEND MESSAGE HANDLER
+  // 3. SELECT EXISTING SESSION FROM DRAWER
+  // ---------------------------------------------------------------------------
+  const handleSelectSession = async (targetId: string) => {
+    if (targetId === sessionId || isPending) return;
+
+    setIsPending(true);
+    setErrorMessage(null);
+
+    try {
+      const res = await fetchSessionHistory(targetId);
+      if (res.success) {
+        setSessionId(targetId);
+        localStorage.setItem(SESSION_STORAGE_KEY, targetId);
+
+        if (res.messages && res.messages.length > 0) {
+          const restored: ChatMessageType[] = res.messages.map((m) => ({
+            id: m.id,
+            role: m.role as "user" | "assistant",
+            content: m.content,
+            agent: m.agent || undefined,
+            timestamp: new Date(m.created_at).toLocaleTimeString([], {
+              hour: "2-digit",
+              minute: "2-digit",
+            }),
+          }));
+          setMessages(restored);
+
+          const lastAssistant = [...restored].reverse().find((m) => m.role === "assistant");
+          if (lastAssistant?.agent) {
+            setLastAgent(lastAssistant.agent);
+          }
+        } else {
+          setMessages([]);
+        }
+      } else {
+        setErrorMessage("Could not load session history. The session may have expired.");
+      }
+    } catch {
+      setErrorMessage("Failed to switch session.");
+    } finally {
+      setIsPending(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // 4. SEND MESSAGE HANDLER
   // ---------------------------------------------------------------------------
   const handleSendMessage = async (textToSend?: string) => {
     const text = (textToSend || inputValue).trim();
@@ -138,6 +222,20 @@ export function App() {
 
     setMessages((prev) => [...prev, userMessage]);
     setIsPending(true);
+
+    const currentList = loadSessionsIndex();
+    const existing = currentList.find((s) => s.id === sessionId);
+    const summaryTitle = text.length > 38 ? `${text.slice(0, 38)}…` : text;
+
+    const updatedList = [
+      {
+        id: sessionId,
+        title: existing && existing.title !== "New Conversation" ? existing.title : summaryTitle,
+        lastActive: new Date().toISOString(),
+      },
+      ...currentList.filter((s) => s.id !== sessionId),
+    ];
+    saveSessionsIndex(updatedList);
 
     try {
       const response = await sendChatMessage(sessionId, text);
@@ -162,7 +260,6 @@ export function App() {
         return;
       }
 
-      // If backend returned or canonicalized sessionId, keep localStorage in sync
       if (response.sessionId && response.sessionId !== sessionId) {
         setSessionId(response.sessionId);
         localStorage.setItem(SESSION_STORAGE_KEY, response.sessionId);
@@ -221,130 +318,116 @@ export function App() {
   };
 
   // ---------------------------------------------------------------------------
-  // 4. TWO-PHASE BOOKING CONFIRMATION DISPATCH
+  // 5. BOOKING & SCHEDULING ACTION HANDLERS
   // ---------------------------------------------------------------------------
   const handleBookSlot = (slot: SlotOption, email: string, timezone: string) => {
-    // Send standard natural booking request to Orchestrator + Scheduler Agent
     const bookingMessage = `Please confirm and book my discovery call for slot: ${slot.start} to ${slot.end}. My email is ${email} and my timezone is ${timezone}.`;
     handleSendMessage(bookingMessage);
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      handleSendMessage();
-    }
+  const handleReschedule = () => {
+    handleSendMessage("Please reschedule my discovery call to another available time.");
+  };
+
+  const handleCancelBooking = () => {
+    handleSendMessage("Please cancel my scheduled discovery call.");
   };
 
   return (
     <div className="app-shell">
-      {/* GLOBAL HEADER */}
+      {/* FLOATING WEIGHTLESS HEADER */}
       <Header
         sessionId={sessionId}
         onNewChat={handleNewChat}
         showTrace={showTrace}
         onToggleTrace={() => setShowTrace((prev) => !prev)}
+        onToggleSessions={() => setShowSessions((prev) => !prev)}
       />
 
-      {/* WORKSPACE AREA */}
-      <div className="app-main-layout">
-        {/* CHAT SECTION */}
-        <main className="chat-viewport">
-          <div className="chat-scroll-area">
-            {isInitializing ? (
-              <div className="chat-initializing-state">
-                <div className="initializing-spinner" />
-                <p>Restoring conversation session...</p>
-              </div>
-            ) : messages.length === 0 ? (
-              <EmptyState onSelectPrompt={(p) => handleSendMessage(p)} />
-            ) : (
-              <div className="messages-stream">
-                {messages.map((msg) => (
-                  <ChatMessage
-                    key={msg.id}
-                    message={msg}
-                    onBookSlot={handleBookSlot}
-                    isPending={isPending}
-                  />
-                ))}
+      {/* SESSIONS SLIDE-OUT OVERLAY */}
+      <SessionDrawer
+        isOpen={showSessions}
+        onClose={() => setShowSessions(false)}
+        activeSessionId={sessionId}
+        sessions={sessions}
+        onSelectSession={handleSelectSession}
+        onNewSession={handleNewChat}
+      />
 
-                {isPending && (
-                  <div className="message-row assistant-row">
-                    <div className="message-bubble assistant-bubble thinking-bubble">
-                      <div className="thinking-dots">
-                        <span />
-                        <span />
-                        <span />
+      {/* MAIN VIEWPORT (SPACIOUS & LUXURIOUS) */}
+      <main className="app-main-viewport">
+        <div className="messages-scroll-area">
+          {isInitializing ? (
+            <div className="quiet-loading-state">
+              <div className="quiet-loading-dot" />
+              <span>Restoring session…</span>
+            </div>
+          ) : messages.length === 0 ? (
+            <EmptyState onSelectPrompt={(p) => handleSendMessage(p)} />
+          ) : (
+            <div className="messages-stream-container">
+              {messages.map((msg, index) => (
+                <ChatMessage
+                  key={msg.id}
+                  message={msg}
+                  onBookSlot={handleBookSlot}
+                  onReschedule={handleReschedule}
+                  onCancelBooking={handleCancelBooking}
+                  onSelectPrompt={(p) => handleSendMessage(p)}
+                  isPending={isPending}
+                  isLatest={index === messages.length - 1}
+                />
+              ))}
+
+              {isPending && (
+                <div className="editorial-message-row assistant-row">
+                  <div className="assistant-editorial-flow">
+                    <div className="assistant-flow-header">
+                      <div className="assistant-id-cluster">
+                        <div className="cf-mark-badge">
+                          <span>CF</span>
+                        </div>
+                        <span className="assistant-title-text">CloseFuture AI</span>
+                        <span className="agent-subtle-tag thinking-tag">
+                          Thinking…
+                        </span>
                       </div>
-                      <span className="thinking-text">
-                        CloseFuture Assistant is thinking...
-                      </span>
+                    </div>
+                    <div className="thinking-quiet-indicator">
+                      <span className="dot-wave" />
+                      <span className="dot-wave" />
+                      <span className="dot-wave" />
+                      <span className="thinking-meta-note">Coordinating agents & checking verified sources</span>
                     </div>
                   </div>
-                )}
+                </div>
+              )}
 
-                <div ref={messagesEndRef} />
-              </div>
-            )}
-          </div>
+              <div ref={messagesEndRef} />
+            </div>
+          )}
+        </div>
 
-          {/* CHAT INPUT FORM */}
-          <div className="chat-input-dock">
-            {errorMessage && (
-              <div className="input-error-banner">
-                <span>⚠️ {errorMessage}</span>
-                <button
-                  type="button"
-                  className="btn-dismiss-error"
-                  onClick={() => setErrorMessage(null)}
-                >
-                  ✕
-                </button>
-              </div>
-            )}
+        {/* FLOATING COMPOSER */}
+        <Composer
+          value={inputValue}
+          onChange={setInputValue}
+          onSend={() => handleSendMessage()}
+          isPending={isPending}
+          errorMessage={errorMessage}
+          onDismissError={() => setErrorMessage(null)}
+        />
+      </main>
 
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                handleSendMessage();
-              }}
-              className="chat-input-form"
-            >
-              <textarea
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Ask about CloseFuture services, case studies, or book a discovery call..."
-                rows={1}
-                disabled={isPending}
-                className="chat-textarea"
-              />
-              <button
-                type="submit"
-                disabled={isPending || !inputValue.trim()}
-                className="btn-send-message"
-                title="Send Message"
-              >
-                Send
-              </button>
-            </form>
-            <p className="dock-disclaimer">
-              Powered by CloseFuture Studio Multi-Agent Architecture • Verified with Google Calendar & Resend
-            </p>
-          </div>
-        </main>
-
-        {/* DEVELOPER TRACE PANEL */}
-        {showTrace && (
-          <TracePanel
-            sessionId={sessionId}
-            trace={lastTrace}
-            lastAgent={lastAgent}
-            onClose={() => setShowTrace(false)}
-          />
-        )}
-      </div>
+      {/* RIGHT INSPECTOR SLIDE-OUT OVERLAY */}
+      {showTrace && (
+        <TracePanel
+          sessionId={sessionId}
+          trace={lastTrace}
+          lastAgent={lastAgent}
+          onClose={() => setShowTrace(false)}
+        />
+      )}
     </div>
   );
 }

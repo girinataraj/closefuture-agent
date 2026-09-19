@@ -1,26 +1,39 @@
 :root {
-  --bg-main: #0b0f17;
-  --bg-surface: #111827;
-  --bg-card: #1f2937;
-  --bg-card-hover: #374151;
-  --border-subtle: #374151;
-  --border-focus: #6366f1;
+  /* Premium Dark SaaS Palette */
+  --bg-main: #07090D;
+  --bg-surface: #0D1118;
+  --bg-elevated: #111722;
+  --bg-elevated-hover: #171F2E;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --border-hover: rgba(255, 255, 255, 0.16);
+  --border-focus: #8B6CFF;
 
-  --text-primary: #f9fafb;
-  --text-secondary: #9ca3af;
-  --text-muted: #6b7280;
+  --text-primary: #F5F7FA;
+  --text-secondary: #A0A9BA;
+  --text-muted: #667085;
 
-  --accent-primary: #6366f1;
-  --accent-primary-hover: #4f46e5;
-  --accent-glow: rgba(99, 102, 241, 0.2);
+  --accent-primary: #8B6CFF;
+  --accent-primary-hover: #7854f7;
+  --accent-secondary: #A996FF;
+  --accent-glow: rgba(139, 108, 255, 0.18);
+  --accent-subtle: rgba(139, 108, 255, 0.08);
 
-  --success-green: #10b981;
-  --success-bg: rgba(16, 185, 129, 0.15);
-  --warning-amber: #f59e0b;
-  --danger-red: #ef4444;
+  --success-green: #2DD4A8;
+  --success-bg: rgba(45, 212, 168, 0.1);
+  --success-glow: rgba(45, 212, 168, 0.2);
+  --warning-amber: #F59E0B;
+  --danger-red: #EF4444;
 
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, "Open Sans", "Helvetica Neue", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-full: 9999px;
+
+  --transition-fast: 0.15s ease;
+  --transition-normal: 0.25s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 * {
@@ -33,11 +46,21 @@ html, body {
   height: 100%;
   width: 100%;
   background-color: var(--bg-main);
+  background-image: 
+    radial-gradient(ellipse 65% 45% at 42% 28%, rgba(139, 108, 255, 0.075), transparent 68%),
+    radial-gradient(circle at 82% 16%, rgba(99, 102, 241, 0.035), transparent 48%),
+    radial-gradient(circle at 18% 75%, rgba(139, 108, 255, 0.02), transparent 50%),
+    linear-gradient(rgba(255, 255, 255, 0.014) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.014) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 100% 100%, 48px 48px, 48px 48px;
+  background-attachment: fixed;
   color: var(--text-primary);
   font-family: var(--font-sans);
-  font-size: 15px;
-  line-height: 1.5;
+  font-size: 16px;
+  line-height: 1.65;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
 }
 
 #root {
@@ -57,4 +80,24 @@ button {
 
 input, textarea {
   font-family: inherit;
+  color: inherit;
+}
+
+/* Custom understated scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.22);
 }
