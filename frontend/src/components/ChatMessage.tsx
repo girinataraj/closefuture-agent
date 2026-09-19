@@ -31,9 +31,24 @@ interface ChatMessageProps {
 }
 
 /**
- * Editorial Markdown renderer: clean typography, headings, lists, bold text.
+ * Returns true for lines that are raw source metadata injected by the RAG layer.
+ * Matches patterns like:
+ *   "Source: Page 5 — Services"
+ *   "Sources: Page 8"
+ *   "Source: CloseFuture..."
+ * These are fully hidden when a structured citation component is already rendered.
  */
-function renderEditorialContent(content: string) {
+function isRawSourceLine(line: string): boolean {
+  // Matches any line that begins with "Source:" or "Sources:" (case-insensitive)
+  return /^\s*sources?\s*:/i.test(line.trim());
+}
+
+/**
+ * Editorial Markdown renderer — clean typography, headings, lists, bold text.
+ * When hasSources=true, lines matching raw "Source: Page N" patterns are
+ * rendered as muted metadata rather than primary paragraph text.
+ */
+function renderEditorialContent(content: string, hasSources = false) {
   const lines = content.split("\n");
   const elements: React.ReactNode[] = [];
   let listItems: string[] = [];
@@ -53,6 +68,14 @@ function renderEditorialContent(content: string) {
 
   lines.forEach((line, idx) => {
     const trimmed = line.trim();
+
+    // Fully hide raw source lines when structured citations are already rendered.
+    // These are redundant metadata — the Verified Source chip carries the same info.
+    if (hasSources && isRawSourceLine(trimmed)) {
+      flushList(`flush-${idx}`);
+      // Skip entirely — do NOT render even muted text
+      return;
+    }
 
     if (trimmed.startsWith("### ")) {
       flushList(`flush-${idx}`);
@@ -107,14 +130,19 @@ function renderInlineMarkdown(text: string): React.ReactNode {
   });
 }
 
+/**
+ * Detects a known project in the response content AND in the source chunks.
+ * Returns only { name, category } — NO fabricated desc, outcome, or metrics.
+ * The actual project description is rendered from the response body itself.
+ */
 function detectCaseStudy(content: string, sources?: any[]) {
   const projects = [
-    { name: "Dipy", category: "UGC Marketplace Platform", desc: "Two-sided creator & brand marketplace built in 2026 on Bubble with semantic AI discovery." },
-    { name: "Liya AI", category: "Enterprise Wellbeing", desc: "Conversational employee wellbeing platform delivering continuous sentiment analysis." },
-    { name: "Galaxy Move", category: "Logistics & Moving Workflow", desc: "Interactive customer estimation and booking system with multi-step scheduling." },
-    { name: "Randevmeste", category: "Field Service Booking", desc: "Real-time appointments engine built for field technicians and dispatchers." },
-    { name: "Vigo", category: "Last-Mile Delivery Operations", desc: "Fleet operations and dispatch dashboard with route tracking and courier metrics." },
-    { name: "Webiz", category: "Global Engineering Hub", desc: "Talent platform enabling rapid distributed team augmentation and developer matching." },
+    { name: "Dipy",        category: "UGC Marketplace Platform" },
+    { name: "Liya AI",     category: "Enterprise Wellbeing" },
+    { name: "Galaxy Move", category: "Logistics & Moving Workflow" },
+    { name: "Randevmeste", category: "Field Service Booking" },
+    { name: "Vigo",        category: "Last-Mile Delivery Operations" },
+    { name: "Webiz",       category: "Global Engineering Hub" },
   ];
 
   for (const proj of projects) {
@@ -122,6 +150,7 @@ function detectCaseStudy(content: string, sources?: any[]) {
     const inSource = sources?.some((s) =>
       s.section?.toLowerCase().includes(proj.name.toLowerCase())
     );
+    // Only show spotlight when BOTH conditions are met — name in response AND in RAG source
     if (mentionsName && inSource) {
       return proj;
     }
@@ -180,18 +209,38 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
     setSelectedSlot(null);
   };
 
+  // Only use the case-study spotlight when content AND sources confirm the project.
   const caseStudy = !isUser ? detectCaseStudy(message.content, message.sources) : null;
+  const hasSources = !!(message.sources && message.sources.length > 0);
+
+  /**
+   * MULTI-INTENT: suppress contradictory body text when real scheduling data is present.
+   * If the backend answer is a "no-knowledge" fallback phrase but slots/booking were
+   * returned alongside it, the text contradicts the UI. Skip rendering the body.
+   * We do NOT fabricate a replacement — the scheduling UI speaks for itself.
+   */
+  const hasSchedulingData = !!(message.slots?.length || message.booking?.meetLink || message.awaitingSchedule);
+  const NO_ANSWER_PATTERNS = [
+    /i don'?t have (reliable|sufficient|enough|verified|accurate)/i,
+    /i (don'?t|do not|cannot|can'?t) (find|locate|provide|access|retrieve)/i,
+    /no (reliable|verified|accurate|sufficient) (information|data|knowledge)/i,
+    /not (available|found|in my knowledge|in the knowledge base)/i,
+    /outside (my|the) (knowledge|scope|verified)/i,
+  ];
+  const suppressBody =
+    hasSchedulingData &&
+    NO_ANSWER_PATTERNS.some((re) => re.test(message.content));
 
   return (
     <div className={`editorial-message-row ${isUser ? "user-row" : "assistant-row"}`}>
-      {/* USER BUBBLE (Restrained, elevated) */}
+      {/* USER BUBBLE */}
       {isUser ? (
         <div className="user-message-card">
           <p className="user-message-text">{message.content}</p>
           <span className="user-timestamp-text">{message.timestamp}</span>
         </div>
       ) : (
-        /* ASSISTANT EDITORIAL PRESENTATION (Not a heavy box) */
+        /* ASSISTANT EDITORIAL PRESENTATION */
         <div className="assistant-editorial-flow">
           {/* ASSISTANT LINEAGE HEADER */}
           <div className="assistant-flow-header">
@@ -201,9 +250,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
               </div>
               <span className="assistant-title-text">CloseFuture AI</span>
               {message.agent && (
-                <span className="agent-subtle-tag">
-                  {message.agent}
-                </span>
+                <span className="agent-subtle-tag">{message.agent.trim()}</span>
               )}
             </div>
 
@@ -220,7 +267,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
             </div>
           </div>
 
-          {/* GUARDRAIL NOTICE (If blocked) */}
+          {/* GUARDRAIL NOTICE */}
           {message.isBlocked && (
             <div className="guardrail-clean-notice">
               <span className="guardrail-dot" />
@@ -228,7 +275,10 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
             </div>
           )}
 
-          {/* EDITORIAL CASE STUDY SPOTLIGHT */}
+          {/* CASE STUDY SPOTLIGHT
+              — Only rendered when content + sources confirm a known project.
+              — No static fabricated description: category label + kicker only.
+              — The response body (rendered below) carries the actual project detail. */}
           {caseStudy && (
             <div className="editorial-case-study-hero">
               <div className="case-study-topline">
@@ -236,18 +286,21 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                 <span className="case-study-sector">{caseStudy.category}</span>
               </div>
               <h3 className="case-study-heading">{caseStudy.name}</h3>
-              <p className="case-study-summary">{caseStudy.desc}</p>
               <div className="case-study-divider" />
             </div>
           )}
 
-          {/* BODY CONTENT (Clean Typography, generous whitespace) */}
-          <div className="editorial-text-content">
-            {renderEditorialContent(message.content)}
-          </div>
+          {/* BODY CONTENT
+              Suppressed when body contradicts scheduling data (multi-intent case).
+              hasSources=true causes raw "Source: Page N" lines to be fully hidden. */}
+          {!suppressBody && (
+            <div className="editorial-text-content">
+              {renderEditorialContent(message.content, hasSources)}
+            </div>
+          )}
 
-          {/* CITATIONS COMPONENT (Understated, clickable) */}
-          {message.sources && message.sources.length > 0 && (
+          {/* CITATIONS COMPONENT */}
+          {hasSources && (
             <div className="understated-citations-wrapper">
               <button
                 type="button"
@@ -258,22 +311,21 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                 <span className="citation-check-icon">✓</span>
                 <span className="citation-label-strong">Verified source</span>
                 <span className="citation-doc-ref">
-                  CloseFuture Company Profile · Page {message.sources[0]?.page ?? "1"}
+                  CloseFuture Company Profile · Page {message.sources![0]?.page ?? "1"}
                 </span>
-                {message.sources.length > 1 && (
-                  <span className="citation-more-pill">+{message.sources.length - 1} more</span>
+                {message.sources!.length > 1 && (
+                  <span className="citation-more-pill">+{message.sources!.length - 1} more</span>
                 )}
                 <span className="citation-arrow-glyph">{expandedSources ? "▴" : "▾"}</span>
               </button>
 
-              {/* EXPANDED SOURCES PANEL */}
               {expandedSources && (
                 <div className="citations-popover-panel">
                   <div className="popover-title-row">
                     <span className="popover-title">Ground Truth Chunks (pgvector)</span>
                   </div>
                   <ul className="popover-sources-list">
-                    {message.sources.map((src, sIdx) => {
+                    {message.sources!.map((src, sIdx) => {
                       const label = [
                         src.page ? `Page ${src.page}` : null,
                         src.section ? src.section : null,
@@ -301,7 +353,45 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
             </div>
           )}
 
-          {/* NATIVE SCHEDULING INTERFACE */}
+          {/* INLINE SCHEDULING PROMPT
+              Rendered when backend signals scheduling intent but needs
+              timezone / preferred day before fetching real Google Calendar slots.
+              User clicks "Check availability" which sends the natural-language booking query. */}
+          {message.awaitingSchedule && !message.slots?.length && !message.booking && (
+            <div className="inline-scheduling-prompt">
+              <div className="isp-header">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2"
+                  strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="4" width="18" height="18" rx="2" ry="2"/>
+                  <line x1="16" y1="2" x2="16" y2="6"/>
+                  <line x1="8" y1="2" x2="8" y2="6"/>
+                  <line x1="3" y1="10" x2="21" y2="10"/>
+                </svg>
+                <span className="isp-title">Book a Discovery Call</span>
+                <span className="isp-meta">30 min · Google Meet · Google Calendar</span>
+              </div>
+              <p className="isp-description">
+                We'll check real availability from the CloseFuture calendar and reserve a slot for you.
+              </p>
+              <button
+                type="button"
+                className="btn-isp-trigger"
+                disabled={isPending}
+                onClick={() => onSelectPrompt?.("Can I book a discovery call?")}
+              >
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" strokeWidth="2.5"
+                  strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="5" x2="12" y2="19"/>
+                  <line x1="5" y1="12" x2="19" y2="12"/>
+                </svg>
+                <span>Check availability →</span>
+              </button>
+            </div>
+          )}
+
+          {/* NATIVE SCHEDULING INTERFACE — real slots from Google Calendar */}
           {message.slots && message.slots.length > 0 && (
             <div className="native-scheduling-surface">
               <div className="scheduling-surface-header">
@@ -346,7 +436,6 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                 </div>
               </div>
 
-              {/* COMPACT CONFIRMATION FORM */}
               {selectedSlot && (
                 <form onSubmit={handleConfirmBooking} className="sched-expand-booking-form">
                   <div className="booking-summary-banner">
@@ -481,7 +570,6 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                 )}
               </div>
 
-              {/* CANCEL MODAL */}
               {showCancelModal && (
                 <div className="cancel-dialog-banner">
                   <p className="cancel-dialog-title">Cancel this discovery call?</p>

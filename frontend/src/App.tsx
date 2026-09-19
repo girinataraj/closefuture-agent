@@ -290,6 +290,14 @@ export function App() {
         booking: data.scheduler?.booking,
         trace: data.trace,
         isBlocked: data.status === "blocked",
+        // Show inline scheduling prompt when backend has booking intent but needs clarification
+        awaitingSchedule:
+          !data.scheduler?.slots?.length &&
+          !data.scheduler?.booking &&
+          data.route?.requiresClarification === true &&
+          (data.route?.intents ?? []).some((i: string) =>
+            ["scheduling", "booking", "discovery_call", "book"].includes(i.toLowerCase())
+          ),
       };
 
       setMessages((prev) => [...prev, assistantMessage]);

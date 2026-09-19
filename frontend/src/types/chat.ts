@@ -49,6 +49,8 @@ export interface ChatMessage {
   booking?: BookingConfirmation;
   trace?: SanitizedTrace;
   isBlocked?: boolean;
+  /** True when backend has scheduling intent but needs timezone/day before fetching slots */
+  awaitingSchedule?: boolean;
 }
 
 export interface ChatApiResponse {
