@@ -263,6 +263,55 @@ function detectCaseStudy(content: string, sources?: any[]) {
   return null;
 }
 
+const NO_ANSWER_PATTERNS = [
+  /i don'?t have (reliable|sufficient|enough|verified|accurate)/i,
+  /i (don'?t|do not|cannot|can'?t) (find|locate|provide|access|retrieve)/i,
+  /no (reliable|verified|accurate|sufficient) (information|data|knowledge)/i,
+  /not (available|found|in my knowledge|in the knowledge base)/i,
+  /outside (my|the) (knowledge|scope|verified)/i,
+];
+
+/**
+ * Strips contradictory no-answer disclaimers and redundant scheduling transition boilerplate
+ * from response body when scheduling continuation UI or slots are rendered.
+ */
+function cleanSchedulingBodyText(content: string, isSchedulingFlow: boolean): string {
+  if (!isSchedulingFlow) return content;
+
+  const lines = content.split("\n");
+  const cleaned: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      cleaned.push(line);
+      continue;
+    }
+
+    // Strip contradictory no-answer disclaimers when scheduling continuation UI is rendered
+    if (NO_ANSWER_PATTERNS.some((re) => re.test(trimmed))) {
+      const sentences = line.match(/[^.!?]+(?:[.!?]+["']?\s*|$)/g);
+      if (sentences && sentences.length > 1) {
+        const kept = sentences.filter((s) => !NO_ANSWER_PATTERNS.some((re) => re.test(s))).join("").trim();
+        if (kept) cleaned.push(kept);
+      }
+      continue;
+    }
+
+    // Strip redundant scheduling transition boilerplate when scheduling UI is already rendered
+    const isTransition =
+      /to schedule (your|a) discovery call/i.test(trimmed) &&
+      /(?:scheduling assistant|timezone|preferred day|arrange this for you)/i.test(trimmed);
+    if (isTransition) {
+      continue;
+    }
+
+    cleaned.push(line);
+  }
+
+  return cleaned.join("\n").trim();
+}
+
 export const ChatMessage: React.FC<ChatMessageProps> = ({
   message,
   onBookSlot,
@@ -296,19 +345,16 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
     message.trace?.intent?.toLowerCase().includes("schedul")
   );
 
-  const NO_ANSWER_PATTERNS = [
-    /i don'?t have (reliable|sufficient|enough|verified|accurate)/i,
-    /i (don'?t|do not|cannot|can'?t) (find|locate|provide|access|retrieve)/i,
-    /no (reliable|verified|accurate|sufficient) (information|data|knowledge)/i,
-    /not (available|found|in my knowledge|in the knowledge base)/i,
-    /outside (my|the) (knowledge|scope|verified)/i,
-  ];
+  // When native scheduling flow is used, remove Cal.com references, contradictory no-answer text, and redundant transition boilerplate
+  let contentToDisplay = isNativeSchedulingFlow ? removeCalComSentences(message.content) : message.content;
+  if (hasSchedulingData) {
+    contentToDisplay = cleanSchedulingBodyText(contentToDisplay, true);
+  }
+
   const suppressBody =
     hasSchedulingData &&
-    NO_ANSWER_PATTERNS.some((re) => re.test(message.content));
-
-  // When native scheduling flow is used, remove Cal.com sentences from rendered and copied content
-  const contentToDisplay = isNativeSchedulingFlow ? removeCalComSentences(message.content) : message.content;
+    (contentToDisplay.trim().length === 0 ||
+      (NO_ANSWER_PATTERNS.some((re) => re.test(message.content)) && !hasSources));
 
   const handleCopy = () => {
     navigator.clipboard.writeText(contentToDisplay).then(() => {

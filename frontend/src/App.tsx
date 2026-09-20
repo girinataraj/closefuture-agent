@@ -276,6 +276,19 @@ export function App() {
         } catch {}
       }
 
+      const routeIntents: string[] = [
+        ...(data.route?.intents ?? []),
+        ...(data.route?.primaryIntent ? [data.route.primaryIntent] : []),
+        ...(data.trace?.intent ? [data.trace.intent] : []),
+      ];
+      const hasBookingIntent = routeIntents.some((i: string) =>
+        ["booking", "scheduling", "discovery_call", "book"].includes(i.toLowerCase())
+      );
+      const awaitingSchedule =
+        !data.scheduler?.slots?.length &&
+        !data.scheduler?.booking &&
+        hasBookingIntent;
+
       const assistantMessage: ChatMessageType = {
         id: crypto.randomUUID(),
         role: "assistant",
@@ -290,14 +303,7 @@ export function App() {
         booking: data.scheduler?.booking,
         trace: data.trace,
         isBlocked: data.status === "blocked",
-        // Show inline scheduling prompt when backend has booking intent but needs clarification
-        awaitingSchedule:
-          !data.scheduler?.slots?.length &&
-          !data.scheduler?.booking &&
-          data.route?.requiresClarification === true &&
-          (data.route?.intents ?? []).some((i: string) =>
-            ["scheduling", "booking", "discovery_call", "book"].includes(i.toLowerCase())
-          ),
+        awaitingSchedule,
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
