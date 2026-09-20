@@ -97,6 +97,37 @@ function parseRoutingDecision(rawText: string, userMessage: string): RoutingDeci
 }
 
 /**
+ * Removes the scheduling portion from multi-intent search+booking messages
+ * before sending to Search Agent so that RAG vector retrieval is not contaminated.
+ *
+ * Examples:
+ * - "Tell me about your services and can I book a discovery call?" -> "Tell me about your services"
+ * - "Do you build mobile apps, and can I schedule a meeting tomorrow?" -> "Do you build mobile apps"
+ * - "Tell me about Dipy and can I book a call?" -> "Tell me about Dipy"
+ *
+ * Ordinary search messages are preserved unchanged.
+ */
+export function extractSearchMessage(message: string): string {
+  if (!message || typeof message !== "string") return message;
+  const trimmed = message.trim();
+
+  const pattern =
+    /\s*(?:(?:,\s*)?(?:and|also|plus|as well as)\s+|[,;\-—]\s*|[.?!]\s*(?:(?:and|also|plus)\s*,?\s*)?)(?:(?:can|could|how can|how do|may)\s+(?:i|we)\s+|(?:i\s+)?(?:want|would like|'d like)\s+to\s+|(?:is it possible to\s+)|(?:how do i\s+))?(?:book|schedule|arrange|set\s*up|reserve)\s+(?:a\s+|an\s+)?(?:discovery\s+|intro\s+|introductory\s+|demo\s+)?(?:call|meeting|session|slot|chat|appointment|demo)[\s\S]*$/i;
+
+  const match = trimmed.match(pattern);
+  if (match && match.index !== undefined && match.index > 0) {
+    const cleaned = trimmed
+      .slice(0, match.index)
+      .trim()
+      .replace(/[,;?.-]+$/, "")
+      .trim();
+    if (cleaned.length > 0) return cleaned;
+  }
+
+  return trimmed;
+}
+
+/**
  * Core Orchestrator Agent:
  * Coordinates the full conversational lifecycle:
  * Incoming Guardrail -> Intent Classification -> Downstream Agent Dispatch -> Outgoing Guardrail.
@@ -264,7 +295,15 @@ export async function executeOrchestrator(
         "in_progress"
       ).catch((err) => console.warn("[Log Warning]:", err?.message));
 
-      const searchResult = await executeSearchAgent({ sessionId, message });
+      const searchMessage =
+        route.intents.includes("booking")
+          ? extractSearchMessage(message)
+          : message;
+
+      const searchResult = await executeSearchAgent({
+        sessionId,
+        message: searchMessage,
+      });
       candidateAnswer = searchResult.answer;
       candidateSources = searchResult.sources.map((s) => ({
         page: s.page,
@@ -297,17 +336,43 @@ export async function executeOrchestrator(
           return null;
         });
 
-        traceStages.push({ name: "Scheduler Agent", status: "success" });
-        traceStages.push({ name: "Calendar MCP", status: "success" });
-        mcpToolsInvoked.push("get_available_slots");
+        const hasValidSlots = Boolean(
+          schedRes &&
+          schedRes.status === "success" &&
+          Array.isArray(schedRes.slots) &&
+          schedRes.slots.length > 0
+        );
 
-        if (schedRes && schedRes.slots && schedRes.slots.length > 0) {
+        if (hasValidSlots && schedRes && schedRes.slots) {
+          traceStages.push({ name: "Scheduler Agent", status: "success" });
+          traceStages.push({ name: "Calendar MCP", status: "success" });
+          mcpToolsInvoked.push("get_available_slots");
           schedulerResult = schedRes;
           candidateAnswer +=
             "\n\nTo schedule your discovery call with CloseFuture's founder, here are upcoming available slots:\n" +
             schedRes.slots.map((s, i) => `${i + 1}. ${s.display}`).join("\n") +
             "\n\nPlease reply with your preferred slot and email address to confirm.";
         } else {
+          // If Calendar availability fails, DO NOT pretend Calendar MCP succeeded.
+          // The scheduler response/status should accurately indicate the failure.
+          traceStages.push({
+            name: "Scheduler Agent",
+            status: schedRes?.status === "error" ? "failed" : "success",
+          });
+          traceStages.push({
+            name: "Calendar MCP",
+            status: "failed",
+            details:
+              schedRes?.error?.message ||
+              schedRes?.message ||
+              "Calendar availability lookup unavailable",
+          });
+          mcpToolsInvoked.push("get_available_slots");
+          schedulerResult = schedRes || {
+            status: "error",
+            action: "find_slots",
+            message: "Unable to retrieve calendar availability.",
+          };
           candidateAnswer +=
             "\n\nTo schedule your discovery call with CloseFuture's founder, our scheduling assistant can arrange this for you. Please let me know your timezone and preferred day.";
         }
@@ -338,11 +403,10 @@ export async function executeOrchestrator(
         return null;
       });
 
-      traceStages.push({ name: "Scheduler Agent", status: "success" });
-      traceStages.push({ name: "Calendar MCP", status: "success" });
-      mcpToolsInvoked.push(schedRes?.booking ? "book_slot" : "get_available_slots");
-
-      if (schedRes) {
+      if (schedRes && schedRes.status === "success") {
+        traceStages.push({ name: "Scheduler Agent", status: "success" });
+        traceStages.push({ name: "Calendar MCP", status: "success" });
+        mcpToolsInvoked.push(schedRes.booking ? "book_slot" : "get_available_slots");
         schedulerResult = schedRes;
         candidateAnswer = schedRes.message;
 
@@ -357,8 +421,27 @@ export async function executeOrchestrator(
           });
         }
       } else {
-        candidateAnswer =
-          "I can help arrange a discovery call with CloseFuture's founder. Our scheduling assistant is ready to find a suitable time for you (or you can book directly at cal.com/closefuture/meet).";
+        traceStages.push({
+          name: "Scheduler Agent",
+          status: schedRes?.status === "needs_information" ? "success" : "failed",
+        });
+        traceStages.push({
+          name: "Calendar MCP",
+          status: "failed",
+          details:
+            schedRes?.error?.message ||
+            schedRes?.message ||
+            "Calendar operation failed",
+        });
+        mcpToolsInvoked.push(schedAction === "book" ? "book_slot" : "get_available_slots");
+
+        if (schedRes) {
+          schedulerResult = schedRes;
+          candidateAnswer = schedRes.message;
+        } else {
+          candidateAnswer =
+            "I can help arrange a discovery call with CloseFuture's founder. Our scheduling assistant is ready to find a suitable time for you.";
+        }
       }
     } else if (route.primaryIntent === "lead_summary") {
       executingAgent = "lead-summary";
