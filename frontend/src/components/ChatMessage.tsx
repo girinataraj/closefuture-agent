@@ -84,47 +84,77 @@ function stripInlineSourceCitation(text: string): string {
     .trim();
 }
 
-/**
- * Removes sentences or lines referencing Cal.com when native scheduling flow is in use.
- * Handles both full lines/bullets and inline sentences within paragraphs.
- */
-function removeCalComSentences(content: string): string {
-  if (!/cal\.?com/i.test(content)) {
-    return content;
-  }
+const OUTDATED_BOOKING_REGEX = /(?:cal\.?com|closefuture\/meet|book (?:a )?(?:discovery )?call directly|direct meeting booking)/i;
 
-  const lines = content.split("\n");
+/**
+ * Removes sentences or fragments referencing outdated external booking routes:
+ * - cal.com
+ * - cal.com/closefuture/meet
+ * - "book a discovery call directly at"
+ * - "book a call directly at"
+ * Preserves unrelated useful company contact information and normalizes whitespace/punctuation.
+ */
+function sanitizeOutdatedBookingReferences(content: string): string {
+  if (!content) return "";
+
+  // 1. Strip parenthetical and bracketed clauses mentioning cal.com or booking directly at:
+  // e.g. "Our assistant can help (or you can book directly at cal.com/closefuture/meet)."
+  // -> "Our assistant can help."
+  let sanitized = content
+    .replace(/\s*\([^)]*(?:cal\.?com|closefuture\/meet|book (?:a )?(?:discovery )?call directly)[^)]*\)/gi, "")
+    .replace(/\s*\[[^\]]*(?:cal\.?com|closefuture\/meet|book (?:a )?(?:discovery )?call directly)[^\]]*\](?:\([^\)]*\))?/gi, "");
+
+  const lines = sanitized.split("\n");
   const cleanedLines: string[] = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
-    if (!/cal\.?com/i.test(trimmed)) {
+    if (!trimmed) {
+      cleanedLines.push("");
+      continue;
+    }
+
+    if (!OUTDATED_BOOKING_REGEX.test(trimmed)) {
       cleanedLines.push(line);
       continue;
     }
 
-    // If the line is an entire bullet/heading or standalone sentence about cal.com:
-    if (/^([-*•#\d.]\s+|direct meeting|to book|schedule a call)/i.test(trimmed) && !/[.!?]\s+[A-Z0-9]/i.test(trimmed)) {
+    // If the whole line is a bullet item or header referencing cal.com/booking directly:
+    // e.g. "- **Direct Meeting Booking**: cal.com/closefuture/meet"
+    if (/^[-*•#\d.]\s+/i.test(trimmed) && OUTDATED_BOOKING_REGEX.test(trimmed)) {
       continue;
     }
 
-    // Split line into individual sentences
-    const sentences = line.match(/[^.!?]+(?:[.!?]+["']?\s*|$)/g);
-    if (sentences && sentences.length > 0) {
-      const kept = sentences.filter((s) => !/cal\.?com/i.test(s)).join("").trim();
-      if (kept) {
-        cleanedLines.push(kept);
+    // Sentence splitting: match text ending with sentence-ending punctuation followed by space/capital or end of line.
+    // Crucially avoids splitting at internal dots inside URLs/domains (e.g. cal.com)
+    const sentenceRegex = /.*?(?:[.!?](?=\s+[A-Z0-9]|\s*$)|\n|$)/g;
+    const sentences = trimmed.match(sentenceRegex)?.filter((s) => s.trim().length > 0) || [trimmed];
+
+    const keptSentences = sentences.filter((s) => !OUTDATED_BOOKING_REGEX.test(s));
+    const cleanedLine = keptSentences.join(" ").trim();
+
+    if (cleanedLine) {
+      // Normalize any double spaces or punctuation spacing left over
+      const normalized = cleanedLine
+        .replace(/\s{2,}/g, " ")
+        .replace(/\s+([,.!?])/g, "$1")
+        .trim();
+      if (normalized && !OUTDATED_BOOKING_REGEX.test(normalized)) {
+        cleanedLines.push(normalized);
       }
     }
   }
 
-  return cleanedLines.join("\n");
+  return cleanedLines
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /**
  * Editorial Markdown renderer — clean typography, headings, lists, bold text.
  * When hasSources=true, lines matching raw "Source: Page N" patterns are fully hidden.
- * When hideCalCom=true, any lines/sentences referencing Cal.com are omitted.
+ * When hideCalCom=true, any lines/sentences referencing Cal.com or direct booking links are omitted.
  */
 function renderEditorialContent(content: string, hasSources = false, hideCalCom = false) {
   const lines = content.split("\n");
@@ -148,8 +178,11 @@ function renderEditorialContent(content: string, hasSources = false, hideCalCom 
   lines.forEach((line, idx) => {
     const trimmed = line.trim();
 
-    // 1. Skip Cal.com references when native scheduling is active
-    if (hideCalCom && /cal\.?com/i.test(trimmed)) {
+    // 1. Skip Cal.com and direct booking references when native scheduling is active
+    if (
+      hideCalCom &&
+      OUTDATED_BOOKING_REGEX.test(trimmed)
+    ) {
       flushList(`flush-${idx}`);
       return;
     }
@@ -198,7 +231,10 @@ function renderEditorialContent(content: string, hasSources = false, hideCalCom 
       );
     } else if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
       const rawItem = trimmed.slice(2);
-      const cleanedItem = hasSources ? stripInlineSourceCitation(rawItem) : rawItem;
+      let cleanedItem = hasSources ? stripInlineSourceCitation(rawItem) : rawItem;
+      if (hideCalCom) {
+        cleanedItem = sanitizeOutdatedBookingReferences(cleanedItem);
+      }
       if (cleanedItem) {
         listItems.push(cleanedItem);
       }
@@ -206,7 +242,10 @@ function renderEditorialContent(content: string, hasSources = false, hideCalCom 
       flushList(`flush-${idx}`);
     } else {
       flushList(`flush-${idx}`);
-      const cleanedLine = hasSources ? stripInlineSourceCitation(line) : line;
+      let cleanedLine = hasSources ? stripInlineSourceCitation(line) : line;
+      if (hideCalCom) {
+        cleanedLine = sanitizeOutdatedBookingReferences(cleanedLine);
+      }
       if (cleanedLine) {
         elements.push(
           <p key={`p-${idx}`} className="editorial-paragraph">
@@ -336,17 +375,27 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
 
   /**
    * MULTI-INTENT & SCHEDULING FLOW:
-   * Detect when native scheduling flow is active (slots present, booking confirmed, or awaiting scheduling input).
+   * Detect when native scheduling flow or booking intent is active.
    */
   const hasSchedulingData = !!(message.slots?.length || message.booking || message.awaitingSchedule);
-  const isNativeSchedulingFlow = !!(
+  const hasSchedulingIntent = !!(
+    (message.trace?.intent &&
+      ["booking", "scheduling", "discovery_call", "book"].some((i) =>
+        message.trace!.intent.toLowerCase().includes(i)
+      )) ||
+    message.agent?.toLowerCase().includes("schedul")
+  );
+  const shouldSanitizeBookingReferences = !!(
     hasSchedulingData ||
-    message.agent?.toLowerCase().includes("schedul") ||
-    message.trace?.intent?.toLowerCase().includes("schedul")
+    hasSchedulingIntent ||
+    /cal\.?com/i.test(message.content) ||
+    /book (?:a )?(?:discovery )?call directly/i.test(message.content)
   );
 
-  // When native scheduling flow is used, remove Cal.com references, contradictory no-answer text, and redundant transition boilerplate
-  let contentToDisplay = isNativeSchedulingFlow ? removeCalComSentences(message.content) : message.content;
+  // When native scheduling flow or intent is present, remove outdated Cal.com references, contradictory no-answer text, and redundant transition boilerplate
+  let contentToDisplay = shouldSanitizeBookingReferences
+    ? sanitizeOutdatedBookingReferences(message.content)
+    : message.content;
   if (hasSchedulingData) {
     contentToDisplay = cleanSchedulingBodyText(contentToDisplay, true);
   }
@@ -448,7 +497,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
               isNativeSchedulingFlow=true causes Cal.com sentences to be hidden. */}
           {!suppressBody && contentToDisplay.trim().length > 0 && (
             <div className="editorial-text-content">
-              {renderEditorialContent(contentToDisplay, hasSources, isNativeSchedulingFlow)}
+              {renderEditorialContent(contentToDisplay, hasSources, shouldSanitizeBookingReferences)}
             </div>
           )}
 
