@@ -127,6 +127,52 @@ export function extractSearchMessage(message: string): string {
   return trimmed;
 }
 
+const DOMAIN_ENTITIES =
+  /\b(closefuture|dipy|liya|webiz|vigo|galaxy\s+move|randevmeste|namakkal|dipyaman(?:\s+sanyal)?)\b/i;
+
+const DOMAIN_TOPICS =
+  /\b(services?|case\s+stud(?:y|ies)|projects?|technolog(?:y|ies)|tech(?:\s+stack)?|technology\s+stack|founder|company|process|support|maintenance|development|develop|mobile\s+apps?|web\s+apps?|ai|automation|integrations?|pricing|prices?|costs?|rent(?:al)?|office|locations?|timelines?|turnaround|capabilit(?:y|ies)|portfolio|offerings?)\b/i;
+
+const INFORMATIONAL_VERBS =
+  /\b(build|built|use|used|provide|provides|offer|offers|create|creates|work)\b/i;
+
+const QUESTION_MARKERS =
+  /\b(what|who|where|when|how\s+much|how\s+long|how|tell\s+me|tell\s+us|explain|information)\b/i;
+
+/**
+ * Detects presence of clear informational / search signals about CloseFuture.
+ * Requires either a specific domain entity, a core company/offering topic,
+ * or an informational question combined with a relevant action verb.
+ * Avoids false-positive matches on meaningless single-word questions or gibberish.
+ */
+export function hasSearchSignals(message: string): boolean {
+  if (!message || typeof message !== "string") return false;
+  const trimmed = message.trim();
+  if (trimmed.length < 3) return false;
+
+  // 1. Direct company / portfolio entity mention (e.g. "CloseFuture", "Dipy", "Namakkal")
+  if (DOMAIN_ENTITIES.test(trimmed)) return true;
+
+  // 2. Clear domain topic mention (e.g. "services", "pricing", "founder", "mobile app", "rent", "office")
+  if (DOMAIN_TOPICS.test(trimmed)) return true;
+
+  // 3. Informational question marker combined with an action verb (e.g. "what do you build?", "tell me what you do")
+  if (QUESTION_MARKERS.test(trimmed) && INFORMATIONAL_VERBS.test(trimmed)) return true;
+
+  return false;
+}
+
+const BOOKING_PHRASES =
+  /\b(book|booking|schedule|scheduled|scheduling|appointment|discovery\s+call|discovery\s+meeting|meeting|demo|arrange\s+(?:a\s+)?call|talk\s+with\s+(?:the\s+)?founder|reserve\s+(?:a\s+)?(?:slot|time))\b/i;
+
+/**
+ * Detects presence of booking/scheduling signals.
+ */
+export function hasBookingSignals(message: string): boolean {
+  if (!message || typeof message !== "string") return false;
+  return BOOKING_PHRASES.test(message.trim());
+}
+
 /**
  * Core Orchestrator Agent:
  * Coordinates the full conversational lifecycle:
@@ -221,6 +267,57 @@ export async function executeOrchestrator(
 
     const route = parseRoutingDecision(response.output_text?.trim() || "{}", message);
 
+    // -----------------------------------------------------------------------
+    // STEP 3.5: Deterministic Intent Signal Stabilization (FR-3.2, FR-3.6)
+    // -----------------------------------------------------------------------
+    const threshold = process.env.ORCHESTRATOR_CLARIFICATION_THRESHOLD
+      ? parseFloat(process.env.ORCHESTRATOR_CLARIFICATION_THRESHOLD)
+      : DEFAULT_CLARIFICATION_THRESHOLD;
+
+    const hasSearch = hasSearchSignals(message);
+    const hasBooking = hasBookingSignals(message);
+
+    const isUncertain =
+      route.confidence < threshold ||
+      route.requiresClarification ||
+      route.primaryIntent === "unknown";
+
+    if (isUncertain) {
+      if (hasSearch && hasBooking) {
+        route.primaryIntent = "search";
+        route.intents = ["search", "booking"];
+        route.sequence = ["search", "booking"];
+        route.confidence = Math.max(route.confidence, 0.92);
+        route.requiresClarification = false;
+        route.reason = "Deterministic multi-intent (search + booking) signals detected in visitor message.";
+      } else if (hasSearch && !hasBooking) {
+        route.primaryIntent = "search";
+        route.intents = ["search"];
+        route.sequence = ["search"];
+        route.confidence = Math.max(route.confidence, 0.92);
+        route.requiresClarification = false;
+        route.reason = "Deterministic search signal detected in visitor message.";
+      } else if (hasBooking && !hasSearch) {
+        route.primaryIntent = "booking";
+        route.intents = ["booking"];
+        route.sequence = ["booking"];
+        route.confidence = Math.max(route.confidence, 0.92);
+        route.requiresClarification = false;
+        route.reason = "Deterministic booking signal detected in visitor message.";
+      }
+    } else if (hasSearch && hasBooking) {
+      // If both signals are present, ensure multi-intent search + booking sequencing
+      route.primaryIntent = "search";
+      if (!route.intents.includes("search")) {
+        route.intents.unshift("search");
+      }
+      if (!route.intents.includes("booking")) {
+        route.intents.push("booking");
+      }
+      route.sequence = ["search", "booking"];
+      route.requiresClarification = false;
+    }
+
     traceStages.push({
       name: "Orchestrator",
       status: "success",
@@ -239,9 +336,6 @@ export async function executeOrchestrator(
     // -----------------------------------------------------------------------
     // STEP 4: Low-Confidence Clarification Gate (FR-3.6)
     // -----------------------------------------------------------------------
-    const threshold = process.env.ORCHESTRATOR_CLARIFICATION_THRESHOLD
-      ? parseFloat(process.env.ORCHESTRATOR_CLARIFICATION_THRESHOLD)
-      : DEFAULT_CLARIFICATION_THRESHOLD;
 
     if (
       route.confidence < threshold ||
