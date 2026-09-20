@@ -7,7 +7,7 @@ function formatDateTime(isoString?: string, timezone?: string): string {
     const d = new Date(isoString);
     if (isNaN(d.getTime())) return isoString;
     return d.toLocaleString("en-US", {
-      timeZone: timezone || undefined,
+      timeZone: timezone || "Asia/Kolkata",
       weekday: "short",
       month: "short",
       day: "numeric",
@@ -31,27 +31,106 @@ interface ChatMessageProps {
 }
 
 /**
- * Returns true for lines that are raw source metadata injected by the RAG layer.
+ * Returns true for lines that are raw source metadata injected by the RAG layer or LLM.
  * Matches patterns like:
  *   "Source: Page 5 — Services"
  *   "Sources: Page 8"
- *   "Source: CloseFuture..."
+ *   "**Source:** Page 5"
+ *   "- **Source:** Page 5"
+ *   "### Sources"
+ *   "Page 5 — Services & Process"
  * These are fully hidden when a structured citation component is already rendered.
  */
 function isRawSourceLine(line: string): boolean {
-  // Matches any line that begins with "Source:" or "Sources:" (case-insensitive)
-  return /^\s*sources?\s*:/i.test(line.trim());
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+
+  // 1. Strip leading list bullet markers: "- ", "* ", "• ", "1. "
+  const withoutBullet = trimmed.replace(/^([-*•]|\d+\.)\s+/, "").trim();
+
+  // 2. Line starts with Source / Sources (with optional bold, italics, parenthesis, bracket, colon, dash)
+  // Matches:
+  // "Source: ...", "Sources: ...", "Source(s): ..."
+  // "**Source:** ...", "**Sources:** ...", "**Source**: ..."
+  // "*Source:* ...", "*Sources:* ...", "_Source:_ ..."
+  // "(Source: ...)", "[Source: ...]", "(Sources: ...)"
+  // "### Sources:", "## Source:"
+  if (/^(?:#{1,6}\s+)?(?:\(|\[)?\s*[*_`]*\s*sources?(?:\(s\))?\s*[*_`]*\s*[:\-—]/i.test(withoutBullet)) {
+    return true;
+  }
+
+  // 3. Standalone Source header/label:
+  // "Sources:", "Source:", "### Sources", "### Source", "**Sources**", "**Source:**", "Sources"
+  if (/^(?:#{1,6}\s+)?(?:\(|\[)?\s*[*_`]*\s*sources?(?:\(s\))?\s*[*_`]*\s*[:\-—]?\s*(?:\)|\])?$/i.test(withoutBullet)) {
+    return true;
+  }
+
+  // 4. Standalone page citation lines:
+  // "Page 5 — Services & Process", "Page 5, Section 2", "Page 5", "(Page 5)", "CloseFuture Company Profile, Page 5"
+  if (/^(?:closefuture\s+company\s+profile[,\s—–-]+)?page\s+\d+/i.test(withoutBullet)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Strips trailing inline source citations from a sentence or paragraph
+ * e.g. "CloseFuture provides AI engineering (Source: Page 5)." -> "CloseFuture provides AI engineering."
+ */
+function stripInlineSourceCitation(text: string): string {
+  return text
+    .replace(/\s*(?:\(|\[)?\s*[*_`]*\s*sources?(?:\(s\))?\s*[*_`]*\s*[:\-—]\s*[^)\].\n]+(?:\)|\])?\.?\s*$/i, "")
+    .trim();
+}
+
+/**
+ * Removes sentences or lines referencing Cal.com when native scheduling flow is in use.
+ * Handles both full lines/bullets and inline sentences within paragraphs.
+ */
+function removeCalComSentences(content: string): string {
+  if (!/cal\.?com/i.test(content)) {
+    return content;
+  }
+
+  const lines = content.split("\n");
+  const cleanedLines: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!/cal\.?com/i.test(trimmed)) {
+      cleanedLines.push(line);
+      continue;
+    }
+
+    // If the line is an entire bullet/heading or standalone sentence about cal.com:
+    if (/^([-*•#\d.]\s+|direct meeting|to book|schedule a call)/i.test(trimmed) && !/[.!?]\s+[A-Z0-9]/i.test(trimmed)) {
+      continue;
+    }
+
+    // Split line into individual sentences
+    const sentences = line.match(/[^.!?]+(?:[.!?]+["']?\s*|$)/g);
+    if (sentences && sentences.length > 0) {
+      const kept = sentences.filter((s) => !/cal\.?com/i.test(s)).join("").trim();
+      if (kept) {
+        cleanedLines.push(kept);
+      }
+    }
+  }
+
+  return cleanedLines.join("\n");
 }
 
 /**
  * Editorial Markdown renderer — clean typography, headings, lists, bold text.
- * When hasSources=true, lines matching raw "Source: Page N" patterns are
- * rendered as muted metadata rather than primary paragraph text.
+ * When hasSources=true, lines matching raw "Source: Page N" patterns are fully hidden.
+ * When hideCalCom=true, any lines/sentences referencing Cal.com are omitted.
  */
-function renderEditorialContent(content: string, hasSources = false) {
+function renderEditorialContent(content: string, hasSources = false, hideCalCom = false) {
   const lines = content.split("\n");
   const elements: React.ReactNode[] = [];
   let listItems: string[] = [];
+  let inRawSourceSection = false;
 
   const flushList = (key: string) => {
     if (listItems.length > 0) {
@@ -69,12 +148,31 @@ function renderEditorialContent(content: string, hasSources = false) {
   lines.forEach((line, idx) => {
     const trimmed = line.trim();
 
-    // Fully hide raw source lines when structured citations are already rendered.
-    // These are redundant metadata — the Verified Source chip carries the same info.
-    if (hasSources && isRawSourceLine(trimmed)) {
+    // 1. Skip Cal.com references when native scheduling is active
+    if (hideCalCom && /cal\.?com/i.test(trimmed)) {
       flushList(`flush-${idx}`);
-      // Skip entirely — do NOT render even muted text
       return;
+    }
+
+    // 2. Fully hide raw source lines when structured citations are already rendered.
+    if (hasSources) {
+      if (isRawSourceLine(trimmed)) {
+        inRawSourceSection = true;
+        flushList(`flush-${idx}`);
+        return;
+      }
+      // If following a Sources header, also skip subordinate citation items
+      if (inRawSourceSection) {
+        if (trimmed.length === 0) {
+          return;
+        }
+        if (/^([-*•]|\d+\.)\s+/i.test(trimmed) || /^(page\s+\d+|closefuture)/i.test(trimmed.replace(/^[-*•\s]+/, ""))) {
+          flushList(`flush-${idx}`);
+          return;
+        } else {
+          inRawSourceSection = false;
+        }
+      }
     }
 
     if (trimmed.startsWith("### ")) {
@@ -99,16 +197,23 @@ function renderEditorialContent(content: string, hasSources = false) {
         </h2>
       );
     } else if (trimmed.startsWith("- ") || trimmed.startsWith("* ")) {
-      listItems.push(trimmed.slice(2));
+      const rawItem = trimmed.slice(2);
+      const cleanedItem = hasSources ? stripInlineSourceCitation(rawItem) : rawItem;
+      if (cleanedItem) {
+        listItems.push(cleanedItem);
+      }
     } else if (trimmed.length === 0) {
       flushList(`flush-${idx}`);
     } else {
       flushList(`flush-${idx}`);
-      elements.push(
-        <p key={`p-${idx}`} className="editorial-paragraph">
-          {renderInlineMarkdown(line)}
-        </p>
-      );
+      const cleanedLine = hasSources ? stripInlineSourceCitation(line) : line;
+      if (cleanedLine) {
+        elements.push(
+          <p key={`p-${idx}`} className="editorial-paragraph">
+            {renderInlineMarkdown(cleanedLine)}
+          </p>
+        );
+      }
     }
   });
 
@@ -170,20 +275,43 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
   const isUser = message.role === "user";
   const [selectedSlot, setSelectedSlot] = useState<SlotOption | null>(null);
   const [emailInput, setEmailInput] = useState<string>("");
-  const [timezoneInput] = useState<string>(() => {
-    try {
-      return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Kolkata";
-    } catch {
-      return "Asia/Kolkata";
-    }
-  });
+  const [timezoneInput] = useState<string>("Asia/Kolkata");
   const [emailError, setEmailError] = useState<string>("");
   const [copied, setCopied] = useState<boolean>(false);
   const [expandedSources, setExpandedSources] = useState<boolean>(false);
   const [showCancelModal, setShowCancelModal] = useState<boolean>(false);
 
+  // Only use the case-study spotlight when content AND sources confirm the project.
+  const caseStudy = !isUser ? detectCaseStudy(message.content, message.sources) : null;
+  const hasSources = !!(message.sources && message.sources.length > 0);
+
+  /**
+   * MULTI-INTENT & SCHEDULING FLOW:
+   * Detect when native scheduling flow is active (slots present, booking confirmed, or awaiting scheduling input).
+   */
+  const hasSchedulingData = !!(message.slots?.length || message.booking || message.awaitingSchedule);
+  const isNativeSchedulingFlow = !!(
+    hasSchedulingData ||
+    message.agent?.toLowerCase().includes("schedul") ||
+    message.trace?.intent?.toLowerCase().includes("schedul")
+  );
+
+  const NO_ANSWER_PATTERNS = [
+    /i don'?t have (reliable|sufficient|enough|verified|accurate)/i,
+    /i (don'?t|do not|cannot|can'?t) (find|locate|provide|access|retrieve)/i,
+    /no (reliable|verified|accurate|sufficient) (information|data|knowledge)/i,
+    /not (available|found|in my knowledge|in the knowledge base)/i,
+    /outside (my|the) (knowledge|scope|verified)/i,
+  ];
+  const suppressBody =
+    hasSchedulingData &&
+    NO_ANSWER_PATTERNS.some((re) => re.test(message.content));
+
+  // When native scheduling flow is used, remove Cal.com sentences from rendered and copied content
+  const contentToDisplay = isNativeSchedulingFlow ? removeCalComSentences(message.content) : message.content;
+
   const handleCopy = () => {
-    navigator.clipboard.writeText(message.content).then(() => {
+    navigator.clipboard.writeText(contentToDisplay).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     });
@@ -208,28 +336,6 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
     onBookSlot(selectedSlot, emailInput.trim(), timezoneInput.trim());
     setSelectedSlot(null);
   };
-
-  // Only use the case-study spotlight when content AND sources confirm the project.
-  const caseStudy = !isUser ? detectCaseStudy(message.content, message.sources) : null;
-  const hasSources = !!(message.sources && message.sources.length > 0);
-
-  /**
-   * MULTI-INTENT: suppress contradictory body text when real scheduling data is present.
-   * If the backend answer is a "no-knowledge" fallback phrase but slots/booking were
-   * returned alongside it, the text contradicts the UI. Skip rendering the body.
-   * We do NOT fabricate a replacement — the scheduling UI speaks for itself.
-   */
-  const hasSchedulingData = !!(message.slots?.length || message.booking?.meetLink || message.awaitingSchedule);
-  const NO_ANSWER_PATTERNS = [
-    /i don'?t have (reliable|sufficient|enough|verified|accurate)/i,
-    /i (don'?t|do not|cannot|can'?t) (find|locate|provide|access|retrieve)/i,
-    /no (reliable|verified|accurate|sufficient) (information|data|knowledge)/i,
-    /not (available|found|in my knowledge|in the knowledge base)/i,
-    /outside (my|the) (knowledge|scope|verified)/i,
-  ];
-  const suppressBody =
-    hasSchedulingData &&
-    NO_ANSWER_PATTERNS.some((re) => re.test(message.content));
 
   return (
     <div className={`editorial-message-row ${isUser ? "user-row" : "assistant-row"}`}>
@@ -292,10 +398,11 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
 
           {/* BODY CONTENT
               Suppressed when body contradicts scheduling data (multi-intent case).
-              hasSources=true causes raw "Source: Page N" lines to be fully hidden. */}
-          {!suppressBody && (
+              hasSources=true causes raw "Source: Page N" lines to be fully hidden.
+              isNativeSchedulingFlow=true causes Cal.com sentences to be hidden. */}
+          {!suppressBody && contentToDisplay.trim().length > 0 && (
             <div className="editorial-text-content">
-              {renderEditorialContent(message.content, hasSources)}
+              {renderEditorialContent(contentToDisplay, hasSources, isNativeSchedulingFlow)}
             </div>
           )}
 
@@ -369,7 +476,7 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                   <line x1="3" y1="10" x2="21" y2="10"/>
                 </svg>
                 <span className="isp-title">Book a Discovery Call</span>
-                <span className="isp-meta">30 min · Google Meet · Google Calendar</span>
+                <span className="isp-meta">30 min · Google Meet · Asia/Kolkata</span>
               </div>
               <p className="isp-description">
                 We'll check real availability from the CloseFuture calendar and reserve a slot for you.
@@ -502,12 +609,10 @@ export const ChatMessage: React.FC<ChatMessageProps> = ({
                     </span>
                   </div>
                 )}
-                {message.booking.timezone && (
-                  <div className="bar-cell">
-                    <span className="bar-label">TIMEZONE</span>
-                    <span className="bar-value">{message.booking.timezone}</span>
-                  </div>
-                )}
+                <div className="bar-cell">
+                  <span className="bar-label">TIMEZONE</span>
+                  <span className="bar-value">{message.booking.timezone || "Asia/Kolkata"}</span>
+                </div>
                 {message.booking.attendeeEmail && (
                   <div className="bar-cell">
                     <span className="bar-label">GUEST</span>
