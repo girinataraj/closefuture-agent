@@ -38,7 +38,19 @@ export function App() {
     try {
       const raw = localStorage.getItem(SESSIONS_INDEX_KEY);
       if (raw) {
-        return JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          // CLEANUP: remove stale entries whose title is exactly "New Conversation"
+          const cleaned = parsed.filter(
+            (s: SessionIndexItem) => s && s.title && s.title.trim() !== "New Conversation"
+          );
+          if (cleaned.length !== parsed.length) {
+            try {
+              localStorage.setItem(SESSIONS_INDEX_KEY, JSON.stringify(cleaned));
+            } catch {}
+          }
+          return cleaned;
+        }
       }
     } catch {}
     return [];
@@ -113,13 +125,8 @@ export function App() {
       setIsInitializing(false);
 
       createNewSession(newSessionId).catch(() => null);
-
-      const newEntry: SessionIndexItem = {
-        id: newSessionId,
-        title: "New Conversation",
-        lastActive: new Date().toISOString(),
-      };
-      saveSessionsIndex([newEntry, ...existingIndex.filter((s) => s.id !== newSessionId)]);
+      // NOTE: Do not add empty session to visible session index yet.
+      // It will be added on the user's first message with a message-derived title.
     }
 
     initSession();
@@ -147,12 +154,8 @@ export function App() {
 
     createNewSession(freshId).catch(() => null);
 
-    const current = loadSessionsIndex();
-    const updated = [
-      { id: freshId, title: "New Conversation", lastActive: new Date().toISOString() },
-      ...current.filter((s) => s.id !== freshId),
-    ];
-    saveSessionsIndex(updated);
+    // Refresh visible sessions without adding the empty session
+    setSessions(loadSessionsIndex());
   };
 
   // ---------------------------------------------------------------------------

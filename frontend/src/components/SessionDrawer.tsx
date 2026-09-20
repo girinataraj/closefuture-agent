@@ -40,10 +40,13 @@ export const SessionDrawer: React.FC<SessionDrawerProps> = ({
 
   if (!isOpen) return null;
 
-  const filteredSessions = sessions.filter((s) =>
-    s.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    s.id.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const filteredSessions = sessions
+    .filter((s) => s.title && s.title.trim() !== "New Conversation")
+    .filter(
+      (s) =>
+        s.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        s.id.toLowerCase().includes(searchQuery.toLowerCase())
+    );
 
   return (
     <>
